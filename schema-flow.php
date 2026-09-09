@@ -3,7 +3,7 @@
  * Plugin Name: Schema Flow
  * Plugin URI: http://new-media.org.il/
  * Description: נתונים מובנים לאתר — שחזור Product schema שתבנית אלמנטור מדלגת עליו, וישות Book אחת לכל ספר (עמוד נחיתה + דף מוצר).
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: יחיאל נחמני
  * Author URI: http://new-media.org.il/
  * Text Domain: schema-flow
@@ -15,7 +15,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SFLW_VERSION', '1.0.0' );
+define( 'SFLW_VERSION', '1.0.1' );
 define( 'SFLW_PLUGIN_FILE', __FILE__ );
 define( 'SFLW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -75,6 +75,10 @@ final class Schema_Flow {
 		// שתבנית מוצר של Elementor Pro לא מפעילה. ההדפסה רצה ב-10, לכן אנחנו ב-5.
 		add_action( 'wp_footer', [ $this, 'restore_product_data' ], 5 );
 
+		// ווקומרס פולטת שדות ריקים (brand: null כשלא הוגדר מותג). גוגל מתעלם,
+		// אבל אין סיבה לשלוח רעש.
+		add_filter( 'woocommerce_structured_data_product', [ $this, 'clean_product_data' ] );
+
 		// מודול 2 — ישות Book.
 		add_action( 'wp_footer', [ $this, 'print_book_graph' ], 20 );
 
@@ -112,6 +116,31 @@ final class Schema_Flow {
 		}
 
 		WC()->structured_data->generate_product_data( $product );
+	}
+
+	public function clean_product_data( $markup ) {
+		return is_array( $markup ) ? $this->strip_empty( $markup ) : $markup;
+	}
+
+	/**
+	 * מסיר null / מחרוזות ריקות / מערכים ריקים, ומשמר רשימות כרשימות —
+	 * unset מתוך רשימה משאיר מפתחות לא רציפים, ואז json_encode פולט אובייקט.
+	 */
+	private function strip_empty( array $data ): array {
+		$is_list = ( $data === array_values( $data ) );
+		$out     = [];
+
+		foreach ( $data as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$value = $this->strip_empty( $value );
+			}
+			if ( null === $value || '' === $value || [] === $value ) {
+				continue;
+			}
+			$out[ $key ] = $value;
+		}
+
+		return $is_list ? array_values( $out ) : $out;
 	}
 
 	/* ---------------------------------------------------------------
@@ -271,7 +300,7 @@ final class Schema_Flow {
 		}
 		$graph[] = $org;
 
-		return apply_filters( 'sf_schema_graph', $graph, $product );
+		return $this->strip_empty( apply_filters( 'sf_schema_graph', $graph, $product ) );
 	}
 
 	/**
@@ -338,10 +367,16 @@ final class Schema_Flow {
 		if ( $email ) { $org['email']     = $email; }
 		if ( $phone ) { $org['telephone'] = $phone; }
 
+		// Hello + אלמנטור לא מגדירים custom_logo, ולכן ניפול לאייקון האתר.
 		$logo_id = (int) get_theme_mod( 'custom_logo' );
-		$logo    = $logo_id ? wp_get_attachment_image_url( $logo_id, 'full' ) : '';
-		if ( $logo ) {
+		$logo    = $logo_id ? (string) wp_get_attachment_image_url( $logo_id, 'full' ) : '';
+		if ( '' === $logo ) {
+			$logo = (string) get_site_icon_url( 512 );
+		}
+		$logo = (string) apply_filters( 'sf_schema_logo', $logo );
+		if ( '' !== $logo ) {
 			$org['logo'] = [ '@type' => 'ImageObject', 'url' => $logo ];
+			$org['image'] = [ '@id' => $org['@id'] . '-logo' ];
 		}
 
 		return apply_filters( 'sf_schema_organization', $org );
