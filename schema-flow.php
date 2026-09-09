@@ -3,7 +3,7 @@
  * Plugin Name: Schema Flow
  * Plugin URI: http://new-media.org.il/
  * Description: נתונים מובנים לאתר — שחזור Product schema שתבנית אלמנטור מדלגת עליו, וישות Book אחת לכל ספר (עמוד נחיתה + דף מוצר).
- * Version: 1.0.1
+ * Version: 1.1.0
  * Author: יחיאל נחמני
  * Author URI: http://new-media.org.il/
  * Text Domain: schema-flow
@@ -15,7 +15,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SFLW_VERSION', '1.0.1' );
+define( 'SFLW_VERSION', '1.1.0' );
 define( 'SFLW_PLUGIN_FILE', __FILE__ );
 define( 'SFLW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -75,9 +75,13 @@ final class Schema_Flow {
 		// שתבנית מוצר של Elementor Pro לא מפעילה. ההדפסה רצה ב-10, לכן אנחנו ב-5.
 		add_action( 'wp_footer', [ $this, 'restore_product_data' ], 5 );
 
-		// ווקומרס פולטת שדות ריקים (brand: null כשלא הוגדר מותג). גוגל מתעלם,
-		// אבל אין סיבה לשלוח רעש.
-		add_filter( 'woocommerce_structured_data_product', [ $this, 'clean_product_data' ] );
+		// מוסיף משלוח, החזרות ו-validFrom להצעה, ומסיר שדות ריקים
+		// (ווקומרס פולטת brand: null כשלא הוגדר מותג).
+		add_filter( 'woocommerce_structured_data_product', [ $this, 'filter_product_data' ], 10, 2 );
+
+		// הגדרות משלוח והחזרות — גלובליות לכל האתר.
+		add_action( 'admin_menu', [ $this, 'add_settings_page' ] );
+		add_action( 'admin_init', [ $this, 'register_settings' ] );
 
 		// מודול 2 — ישות Book.
 		add_action( 'wp_footer', [ $this, 'print_book_graph' ], 20 );
@@ -118,8 +122,102 @@ final class Schema_Flow {
 		WC()->structured_data->generate_product_data( $product );
 	}
 
-	public function clean_product_data( $markup ) {
-		return is_array( $markup ) ? $this->strip_empty( $markup ) : $markup;
+	public function filter_product_data( $markup, $product = null ) {
+		if ( ! is_array( $markup ) ) {
+			return $markup;
+		}
+
+		if ( isset( $markup['offers'] ) && is_array( $markup['offers'] ) ) {
+			$extras = $this->offer_extras();
+			$from   = $product instanceof WC_Product ? $this->price_valid_from( $product ) : '';
+
+			foreach ( $markup['offers'] as $i => $offer ) {
+				if ( ! is_array( $offer ) ) {
+					continue;
+				}
+				$markup['offers'][ $i ] = array_merge( $offer, $extras );
+
+				// validFrom יושב על מפרט המחיר, לא על ההצעה.
+				if ( '' !== $from && isset( $markup['offers'][ $i ]['priceSpecification'] ) ) {
+					$markup['offers'][ $i ]['priceSpecification'] =
+						$this->add_valid_from( $markup['offers'][ $i ]['priceSpecification'], $from );
+				}
+			}
+		}
+
+		return $this->strip_empty( $markup );
+	}
+
+	/**
+	 * מאיזה תאריך המחיר הנוכחי בתוקף — תחילת המבצע, ואם אין, יצירת המוצר.
+	 */
+	private function price_valid_from( WC_Product $product ): string {
+		$date = $product->get_date_on_sale_from() ?: $product->get_date_created();
+		return $date ? $date->date( 'Y-m-d' ) : '';
+	}
+
+	private function add_valid_from( array $spec, string $from ): array {
+		$is_list = ( $spec === array_values( $spec ) );
+		$specs   = $is_list ? $spec : [ $spec ];
+
+		foreach ( $specs as $i => $one ) {
+			if ( is_array( $one ) && ! isset( $one['validFrom'] ) ) {
+				$specs[ $i ]['validFrom'] = $from;
+			}
+		}
+
+		return $is_list ? $specs : $specs[0];
+	}
+
+	/**
+	 * משלוח והחזרות — שני השדות שגוגל מבקש לכרטיסי מוכרים.
+	 * זה גם מה שמייצר את "משלוח בעלות X ₪ · אפשרות החזרה תוך Y ימים" בתוצאות,
+	 * בלי להיות תלוי בפיד של Merchant Center.
+	 */
+	private function offer_extras(): array {
+		$currency = get_woocommerce_currency();
+		$country  = (string) get_option( 'sf_ship_country', 'IL' );
+
+		$extras = [
+			'shippingDetails' => [
+				'@type'                => 'OfferShippingDetails',
+				'shippingRate'         => [
+					'@type'    => 'MonetaryAmount',
+					'value'    => (string) wc_format_decimal( (float) get_option( 'sf_ship_cost', 24 ), 2 ),
+					'currency' => $currency,
+				],
+				'shippingDestination'  => [
+					'@type'         => 'DefinedRegion',
+					'addressCountry' => $country,
+				],
+				'deliveryTime'         => [
+					'@type'        => 'ShippingDeliveryTime',
+					// גוגל מפרש את שני אלה בימי עסקים.
+					'handlingTime' => [
+						'@type'    => 'QuantitativeValue',
+						'minValue' => (int) get_option( 'sf_handling_min', 1 ),
+						'maxValue' => (int) get_option( 'sf_handling_max', 2 ),
+						'unitCode' => 'DAY',
+					],
+					'transitTime'  => [
+						'@type'    => 'QuantitativeValue',
+						'minValue' => (int) get_option( 'sf_transit_min', 1 ),
+						'maxValue' => (int) get_option( 'sf_transit_max', 12 ),
+						'unitCode' => 'DAY',
+					],
+				],
+			],
+			'hasMerchantReturnPolicy' => [
+				'@type'                => 'MerchantReturnPolicy',
+				'applicableCountry'    => $country,
+				'returnPolicyCategory' => 'https://schema.org/MerchantReturnFiniteReturnWindow',
+				'merchantReturnDays'   => (int) get_option( 'sf_return_days', 14 ),
+				'returnMethod'         => 'https://schema.org/' . (string) get_option( 'sf_return_method', 'ReturnByMail' ),
+				'returnFees'           => 'https://schema.org/' . (string) get_option( 'sf_return_fees', 'ReturnFeesCustomerResponsibility' ),
+			],
+		];
+
+		return apply_filters( 'sf_schema_offer_extras', $extras );
 	}
 
 	/**
@@ -259,7 +357,7 @@ final class Schema_Flow {
 		// של תוכנית הספרים־לקריאה־אונליין של גוגל, לא של קנייה.
 		$offer = $this->offer( $product, $org['@id'] );
 		if ( $offer ) {
-			$edition['offers'] = $offer;
+			$edition['offers'] = array_merge( $offer, $this->offer_extras() );
 		}
 
 		// היצירה — ישות אחת, ה-@id שלה על עמוד הנחיתה.
@@ -432,6 +530,112 @@ final class Schema_Flow {
 	private function is_book( WC_Product $product ): bool {
 		$is_book = '' !== $this->isbn( $product ) || 'yes' === $product->get_meta( self::M_IS_BOOK );
 		return (bool) apply_filters( 'sf_schema_is_book', $is_book, $product );
+	}
+
+	/* ---------------------------------------------------------------
+	 * הגדרות משלוח והחזרות
+	 * ------------------------------------------------------------- */
+
+	/** @return array<string, array{label:string, type:string, default:string|int, choices?:array<string,string>, hint?:string}> */
+	private function fields(): array {
+		return [
+			'sf_ship_cost'     => [ 'label' => 'עלות משלוח', 'type' => 'number', 'default' => 24, 'hint' => 'בשקלים. 0 = משלוח חינם' ],
+			'sf_ship_country'  => [ 'label' => 'ארץ יעד', 'type' => 'text', 'default' => 'IL', 'hint' => 'קוד דו-אותי' ],
+			'sf_handling_min'  => [ 'label' => 'זמן טיפול — מינימום', 'type' => 'number', 'default' => 1, 'hint' => 'ימי עסקים מההזמנה עד המסירה לשליח' ],
+			'sf_handling_max'  => [ 'label' => 'זמן טיפול — מקסימום', 'type' => 'number', 'default' => 2 ],
+			'sf_transit_min'   => [ 'label' => 'זמן שילוח — מינימום', 'type' => 'number', 'default' => 1, 'hint' => 'ימי עסקים בדרך. הסכום עם זמן הטיפול הוא ההתחייבות כלפי הלקוח' ],
+			'sf_transit_max'   => [ 'label' => 'זמן שילוח — מקסימום', 'type' => 'number', 'default' => 12 ],
+			'sf_return_days'   => [ 'label' => 'חלון החזרה (ימים)', 'type' => 'number', 'default' => 14, 'hint' => 'מיום המסירה' ],
+			'sf_return_method' => [
+				'label' => 'אופן ההחזרה', 'type' => 'select', 'default' => 'ReturnByMail',
+				'choices' => [
+					'ReturnByMail'    => 'בדואר / שליח',
+					'ReturnInStore'   => 'בחנות',
+					'ReturnAtKiosk'   => 'בנקודת איסוף',
+				],
+			],
+			'sf_return_fees'   => [
+				'label' => 'מי משלם על ההחזרה', 'type' => 'select', 'default' => 'ReturnFeesCustomerResponsibility',
+				'choices' => [
+					'ReturnFeesCustomerResponsibility' => 'הלקוח',
+					'FreeReturn'                       => 'החזרה חינם',
+					'ReturnShippingFees'               => 'הלקוח, בעלות משלוח ההחזרה',
+				],
+			],
+		];
+	}
+
+	public function register_settings(): void {
+		foreach ( $this->fields() as $key => $field ) {
+			register_setting( 'sf_schema_settings', $key, [
+				'type'              => 'number' === $field['type'] ? 'number' : 'string',
+				'default'           => $field['default'],
+				'sanitize_callback' => 'number' === $field['type']
+					? static fn( $v ) => max( 0, (int) $v )
+					: 'sanitize_text_field',
+			] );
+		}
+	}
+
+	public function add_settings_page(): void {
+		add_submenu_page(
+			'woocommerce',
+			'Schema Flow — משלוח והחזרות',
+			'Schema Flow',
+			'manage_woocommerce',
+			'schema-flow',
+			[ $this, 'render_settings_page' ]
+		);
+	}
+
+	public function render_settings_page(): void {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		?>
+		<div class="wrap">
+			<h1>Schema Flow — משלוח והחזרות</h1>
+			<p style="max-width:760px">
+				שני השדות שגוגל מבקש לכרטיסי מוכרים, וגם מה שמייצר את
+				"משלוח בעלות X ₪ · אפשרות החזרה תוך Y ימים" בתוצאות החיפוש.
+				ההגדרות חלות על <strong>כל</strong> המוצרים באתר.
+				<strong>שיהיו זהות למה שמוגדר ב-Merchant Center</strong> — אי-התאמה בין השניים
+				היא סיבה לפסילת פריטים.
+			</p>
+			<form method="post" action="options.php">
+				<?php settings_fields( 'sf_schema_settings' ); ?>
+				<table class="form-table" role="presentation">
+					<?php foreach ( $this->fields() as $key => $field ) : ?>
+						<tr>
+							<th scope="row"><label for="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
+							<td>
+								<?php $value = get_option( $key, $field['default'] ); ?>
+								<?php if ( 'select' === $field['type'] ) : ?>
+									<select name="<?php echo esc_attr( $key ); ?>" id="<?php echo esc_attr( $key ); ?>">
+										<?php foreach ( $field['choices'] as $cv => $cl ) : ?>
+											<option value="<?php echo esc_attr( $cv ); ?>" <?php selected( $value, $cv ); ?>>
+												<?php echo esc_html( $cl ); ?>
+											</option>
+										<?php endforeach; ?>
+									</select>
+								<?php else : ?>
+									<input type="<?php echo esc_attr( $field['type'] ); ?>"
+										name="<?php echo esc_attr( $key ); ?>"
+										id="<?php echo esc_attr( $key ); ?>"
+										value="<?php echo esc_attr( (string) $value ); ?>"
+										class="<?php echo 'number' === $field['type'] ? 'small-text' : 'regular-text'; ?>">
+								<?php endif; ?>
+								<?php if ( ! empty( $field['hint'] ) ) : ?>
+									<p class="description"><?php echo esc_html( $field['hint'] ); ?></p>
+								<?php endif; ?>
+							</td>
+						</tr>
+					<?php endforeach; ?>
+				</table>
+				<?php submit_button(); ?>
+			</form>
+		</div>
+		<?php
 	}
 
 	/* ---------------------------------------------------------------
