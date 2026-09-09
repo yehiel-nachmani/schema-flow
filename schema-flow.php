@@ -58,6 +58,9 @@ final class Schema_Flow {
 	const M_AUTHOR_URL = '_sf_book_author_urls';
 	const M_DESC       = '_sf_book_description';
 	const M_GENRE      = '_sf_book_genre';
+	const M_SUBTITLE   = '_sf_book_subtitle';
+	const M_ABOUT      = '_sf_book_about';
+	const M_EDITION    = '_sf_book_edition';
 	const T_MAP        = 'sf_landing_map';
 
 	private static ?self $instance = null;
@@ -196,7 +199,10 @@ final class Schema_Flow {
 		$format = (string) ( $product->get_meta( self::M_FORMAT ) ?: 'Paperback' );
 		$date   = (string) $product->get_meta( self::M_PUBDATE );
 		$desc   = trim( (string) $product->get_meta( self::M_DESC ) );
-		$genre  = array_filter( array_map( 'trim', explode( ',', (string) $product->get_meta( self::M_GENRE ) ) ) );
+		$genre  = $this->csv( (string) $product->get_meta( self::M_GENRE ) );
+		$about  = $this->csv( (string) $product->get_meta( self::M_ABOUT ) );
+		$sub    = trim( (string) $product->get_meta( self::M_SUBTITLE ) );
+		$bedit  = trim( (string) $product->get_meta( self::M_EDITION ) );
 
 		if ( '' === $desc ) {
 			$desc = wp_strip_all_tags( $product->get_short_description() );
@@ -214,18 +220,17 @@ final class Schema_Flow {
 			'publisher'     => [ '@id' => $org['@id'] ],
 		];
 
-		if ( $isbn )   { $edition['isbn']           = $isbn; }
-		if ( $pages )  { $edition['numberOfPages']  = $pages; }
-		if ( $date )   { $edition['datePublished']  = $date; }
-		if ( $person ) { $edition['author']         = [ '@id' => $person['@id'] ]; }
+		if ( $isbn )   { $edition['isbn']          = $isbn; }
+		if ( $pages )  { $edition['numberOfPages'] = $pages; }
+		if ( $date )   { $edition['datePublished'] = $date; }
+		if ( $bedit )  { $edition['bookEdition']   = $bedit; }
+		if ( $person ) { $edition['author']        = [ '@id' => $person['@id'] ]; }
 
+		// מכירה = offers עם Offer. ReadAction/expectsAcceptanceOf היא התבנית
+		// של תוכנית הספרים־לקריאה־אונליין של גוגל, לא של קנייה.
 		$offer = $this->offer( $product, $org['@id'] );
 		if ( $offer ) {
-			$edition['potentialAction'] = [
-				'@type'                => 'ReadAction',
-				'target'               => $product->get_permalink(),
-				'expectsAcceptanceOf'  => $offer,
-			];
+			$edition['offers'] = $offer;
 		}
 
 		// היצירה — ישות אחת, ה-@id שלה על עמוד הנחיתה.
@@ -240,13 +245,20 @@ final class Schema_Flow {
 			'workExample'      => [ $edition ],
 		];
 
-		if ( $desc )   { $work['description']   = $desc; }
-		if ( $isbn )   { $work['isbn']          = $isbn; }
-		if ( $pages )  { $work['numberOfPages'] = $pages; }
-		if ( $date )   { $work['datePublished'] = $date; }
-		if ( $format ) { $work['bookFormat']    = 'https://schema.org/' . $format; }
-		if ( $genre )  { $work['genre']         = array_values( $genre ); }
-		if ( $person ) { $work['author']        = [ '@id' => $person['@id'] ]; }
+		// bookFormat ו-numberOfPages הם מאפייני מהדורה ולא של החיבור — הם יושבים על ה-edition בלבד.
+		if ( $sub )    { $work['alternativeHeadline'] = $sub; }
+		if ( $desc )   { $work['description']        = $desc; }
+		if ( $isbn )   { $work['isbn']               = $isbn; }
+		if ( $date )   { $work['datePublished']      = $date; }
+		if ( $genre )  { $work['genre']              = array_values( $genre ); }
+		if ( $person ) { $work['author']             = [ '@id' => $person['@id'] ]; }
+
+		if ( $about ) {
+			$work['about'] = array_values( array_map(
+				static fn( string $name ) => [ '@type' => 'Person', 'name' => $name ],
+				$about
+			) );
+		}
 
 		$image = wp_get_attachment_image_url( $product->get_image_id(), 'full' );
 		if ( $image ) {
@@ -277,29 +289,62 @@ final class Schema_Flow {
 			return [];
 		}
 
-		return [
+		$offer = [
 			'@type'         => 'Offer',
 			'url'           => $product->get_permalink(),
 			'price'         => wc_format_decimal( $price, wc_get_price_decimals() ),
 			'priceCurrency' => get_woocommerce_currency(),
+			'itemCondition' => 'https://schema.org/NewCondition',
+			// נגזר מהמלאי האמיתי. הצהרת InStock על מוצר שאזל היא אי-התאמה
+			// שגוגל מזהה, ובמרצ'נט סנטר היא פוסלת את הפריט.
 			'availability'  => $product->is_in_stock()
 				? 'https://schema.org/InStock'
 				: 'https://schema.org/OutOfStock',
 			'seller'        => [ '@id' => $seller_id ],
 		];
+
+		// חשוב כשיש מחיר מבצע — בלי תאריך סיום גוגל מתלונן על שדה חסר.
+		$sale_end = $product->get_date_on_sale_to();
+		if ( $sale_end ) {
+			$offer['priceValidUntil'] = $sale_end->date( 'Y-m-d' );
+		}
+
+		return $offer;
+	}
+
+	/** @return string[] */
+	private function csv( string $raw ): array {
+		return array_values( array_filter( array_map( 'trim', explode( ',', $raw ) ) ) );
 	}
 
 	private function organization(): array {
-		return apply_filters( 'sf_schema_organization', [
+		// Yoast באתר לא מייצר צומת ארגון, ולכן publisher/seller היו מצביעים לכלום.
+		$org = [
 			'@type'  => 'Organization',
 			'@id'    => home_url( '/#organization' ),
 			'name'   => get_bloginfo( 'name' ),
 			'url'    => home_url( '/' ),
 			'sameAs' => [
 				'https://www.facebook.com/kvishehad/',
-				'https://www.instagram.com/kvish1',
+				'https://www.instagram.com/kvish1/',
+				'https://www.tiktok.com/@kvish_1',
+				'https://www.youtube.com/c/כבישאחד',
+				'https://open.spotify.com/show/5ELcfhnaEE72SHf3tzltk8',
 			],
-		] );
+		];
+
+		$email = (string) get_option( 'sf_org_email', 'mail@kvish1.co.il' );
+		$phone = (string) get_option( 'sf_org_phone', '' );
+		if ( $email ) { $org['email']     = $email; }
+		if ( $phone ) { $org['telephone'] = $phone; }
+
+		$logo_id = (int) get_theme_mod( 'custom_logo' );
+		$logo    = $logo_id ? wp_get_attachment_image_url( $logo_id, 'full' ) : '';
+		if ( $logo ) {
+			$org['logo'] = [ '@type' => 'ImageObject', 'url' => $logo ];
+		}
+
+		return apply_filters( 'sf_schema_organization', $org );
 	}
 
 	private function person( WC_Product $product, string $org_id ): array {
@@ -456,11 +501,29 @@ final class Schema_Flow {
 			<input type="text" id="sf_genre" name="<?php echo esc_attr( self::M_GENRE ); ?>"
 				value="<?php echo esc_attr( $get( self::M_GENRE ) ); ?>" placeholder="ספרות עברית, פרוזה, הגות יהודית">
 
+			<label for="sf_subtitle">כותרת משנה</label>
+			<input type="text" id="sf_subtitle" name="<?php echo esc_attr( self::M_SUBTITLE ); ?>"
+				value="<?php echo esc_attr( $get( self::M_SUBTITLE ) ); ?>"
+				placeholder="מפגשים עם קבצנים, צדיקים נסתרים, רשעים נסתרים ולילות ייסורים">
+
+			<label for="sf_edition">מהדורה</label>
+			<input type="text" id="sf_edition" name="<?php echo esc_attr( self::M_EDITION ); ?>"
+				value="<?php echo esc_attr( $get( self::M_EDITION ) ); ?>" placeholder="מהדורה ראשונה">
+
+			<label for="sf_about">דמויות ונושאים</label>
+			<input type="text" id="sf_about" name="<?php echo esc_attr( self::M_ABOUT ); ?>"
+				value="<?php echo esc_attr( $get( self::M_ABOUT ) ); ?>"
+				placeholder="רבי נחמן, א״ד גורדון, הרצל, פנחס שדה">
+
 			<label for="sf_desc">משפט מגדיר</label>
 			<textarea id="sf_desc" name="<?php echo esc_attr( self::M_DESC ); ?>" rows="4"
 				placeholder="הפתרון האינסופי הוא ספר מאת… — זה הטקסט שמנועי AI מצטטים"><?php echo esc_textarea( $get( self::M_DESC ) ); ?></textarea>
 		</div>
-		<p class="sf-note">אם השדה ריק, המשפט המגדיר נלקח מהתיאור הקצר של המוצר.</p>
+		<p class="sf-note">
+			אם המשפט המגדיר ריק — הוא נלקח מהתיאור הקצר של המוצר.
+			"דמויות ונושאים" הופך ל-<code>about</code>, ועוזר לגוגל לקשר את הספר לחיפושים על אותן דמויות.
+			המלאי והמחיר נגזרים מהמוצר עצמו ואין מה למלא אותם כאן.
+		</p>
 		<?php
 	}
 
@@ -487,6 +550,9 @@ final class Schema_Flow {
 		$product->update_meta_data( self::M_PAGES, absint( $_POST[ self::M_PAGES ] ?? 0 ) );
 		$product->update_meta_data( self::M_AUTHOR, $text( self::M_AUTHOR ) );
 		$product->update_meta_data( self::M_GENRE, $text( self::M_GENRE ) );
+		$product->update_meta_data( self::M_SUBTITLE, $text( self::M_SUBTITLE ) );
+		$product->update_meta_data( self::M_ABOUT, $text( self::M_ABOUT ) );
+		$product->update_meta_data( self::M_EDITION, $text( self::M_EDITION ) );
 
 		$key = strtolower( $text( self::M_AUTHOR_KEY ) );
 		$product->update_meta_data( self::M_AUTHOR_KEY, preg_replace( '~[^a-z0-9-]~', '', $key ) );
