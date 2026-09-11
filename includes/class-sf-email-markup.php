@@ -191,7 +191,9 @@ final class SF_Email_Markup {
 	 * כתובת בעצמנו בלי לעבור בפילטר.
 	 */
 	private function received_url( WC_Order $order ): string {
-		$url = self::guarded( static fn() => (string) $order->get_checkout_order_received_url() );
+		// silent: באתר הזה הפילטר נופל בכל בקשת אדמין, ורישום לכל מייל היה
+		// מציף את הלוג בלי להוסיף מידע — יש נפילה ידועה ויש מסלול חלופי.
+		$url = self::guarded( static fn() => (string) $order->get_checkout_order_received_url(), true );
 		if ( '' !== $url ) {
 			return $url;
 		}
@@ -582,11 +584,13 @@ final class SF_Email_Markup {
 	 * מריץ שדה לא-קריטי ומחזיר '' אם משהו נפל בדרך. קיים כי שדות כמו
 	 * קישור ותמונה עוברים בפילטרים ציבוריים שכל תוסף באתר יכול לשבת עליהם.
 	 */
-	private static function guarded( callable $fn ): string {
+	private static function guarded( callable $fn, bool $silent = false ): string {
 		try {
 			return (string) $fn();
 		} catch ( \Throwable $e ) {
-			self::log_failure( $e );
+			if ( ! $silent ) {
+				self::log_failure( $e );
+			}
 			return '';
 		}
 	}
