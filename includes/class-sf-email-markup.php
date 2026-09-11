@@ -49,6 +49,7 @@ final class SF_Email_Markup {
 		add_action( 'woocommerce_email_header', [ $this, 'reset' ], 1 );
 		add_action( 'woocommerce_email_order_details', [ $this, 'capture' ], 1, 4 );
 		add_filter( 'woocommerce_mail_content', [ $this, 'inject' ], 99 );
+		add_action( 'admin_post_sf_email_test', [ $this, 'handle_test' ] );
 	}
 
 	/* ---------------------------------------------------------------
@@ -92,26 +93,8 @@ final class SF_Email_Markup {
 			return $content;
 		}
 
-		$nodes = [ $this->order_node( $order ) ];
-		$parcel = $this->parcel_node( $order );
-		if ( $parcel ) {
-			$nodes[] = $parcel;
-		}
-
-		/** אפשר להוסיף/להחליף ישויות מבחוץ (למשל FlightReservation, EventReservation). */
-		$nodes = (array) apply_filters( 'sf_email_markup_nodes', $nodes, $order, $email_id );
-
 		$script = '';
-		foreach ( $nodes as $node ) {
-			if ( ! is_array( $node ) || ! $node ) {
-				continue;
-			}
-			// בלי JSON_UNESCAPED_SLASHES בכוונה — כך "</script>" בשם מוצר
-			// נכתב כ-"<\/script>" ולא סוגר את התגית.
-			$json = wp_json_encode( self::prune( $node ), JSON_UNESCAPED_UNICODE );
-			if ( ! $json ) {
-				continue;
-			}
+		foreach ( $this->nodes_for( $order, $email_id ) as $json ) {
 			$script .= '<script type="application/ld+json">' . $json . "</script>\n";
 		}
 		if ( '' === $script ) {
@@ -125,6 +108,38 @@ final class SF_Email_Markup {
 
 		// substr_replace ולא preg_replace — ב-JSON יש $ ו-\ שהיו מתפרשים כהפניות.
 		return ( false === $pos ) ? $script . $content : substr_replace( $content, $script, $pos, 0 );
+	}
+
+	/**
+	 * הישויות של הזמנה כ-JSON מוכן להטמעה. ציבורי — גם תצוגת הבדיקה באדמין
+	 * משתמשת בו, כדי שמה שנבדק יהיה בדיוק מה שנשלח.
+	 *
+	 * @return string[]
+	 */
+	public function nodes_for( WC_Order $order, string $email_id = 'customer_completed_order' ): array {
+		$nodes  = [ $this->order_node( $order ) ];
+		$parcel = $this->parcel_node( $order );
+		if ( $parcel ) {
+			$nodes[] = $parcel;
+		}
+
+		/** אפשר להוסיף/להחליף ישויות מבחוץ (למשל FlightReservation, EventReservation). */
+		$nodes = (array) apply_filters( 'sf_email_markup_nodes', $nodes, $order, $email_id );
+
+		$out = [];
+		foreach ( $nodes as $node ) {
+			if ( ! is_array( $node ) || ! $node ) {
+				continue;
+			}
+			// בלי JSON_UNESCAPED_SLASHES בכוונה — כך "</script>" בשם מוצר
+			// נכתב כ-"<\/script>" ולא סוגר את התגית.
+			$json = wp_json_encode( self::prune( $node ), JSON_UNESCAPED_UNICODE );
+			if ( $json ) {
+				$out[] = $json;
+			}
+		}
+
+		return $out;
 	}
 
 	/* ---------------------------------------------------------------
@@ -342,6 +357,145 @@ final class SF_Email_Markup {
 		}
 
 		return 'OrderProcessing';
+	}
+
+	/* ---------------------------------------------------------------
+	 * כלי בדיקה באדמין
+	 * ------------------------------------------------------------- */
+
+	/** תוצאת התצוגה/השליחה נשמרת לרגע — ה-JSON גדול מדי בשביל query arg. */
+	private const T_RESULT = 'sf_email_test_';
+
+	/**
+	 * שולח מייל ווקומרס אמיתי של הזמנה קיימת לכתובת אחרת, בלי לגעת בהזמנה:
+	 * מפנים רק את פילטר הנמען, לשליחה אחת.
+	 */
+	public function handle_test(): void {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( 'אין הרשאה', 403 );
+		}
+		check_admin_referer( 'sf_email_test' );
+
+		$order_id = absint( $_POST['sf_order'] ?? 0 );
+		$which    = sanitize_text_field( wp_unslash( $_POST['sf_email_id'] ?? '' ) );
+		$to       = sanitize_email( wp_unslash( $_POST['sf_to'] ?? '' ) );
+		$send     = isset( $_POST['sf_send'] );
+
+		if ( ! in_array( $which, self::EMAILS, true ) ) {
+			$which = 'customer_completed_order';
+		}
+
+		$order = $order_id ? wc_get_order( $order_id ) : null;
+		if ( ! $order instanceof WC_Order ) {
+			$this->finish( 'לא נמצאה הזמנה עם המזהה ' . $order_id, [] );
+		}
+
+		$json = $this->nodes_for( $order, $which );
+
+		if ( ! $send ) {
+			$this->finish( sprintf( 'הסימון של הזמנה %s — %d ישויות.', $order->get_order_number(), count( $json ) ), $json );
+		}
+
+		if ( ! is_email( $to ) ) {
+			$this->finish( 'כתובת יעד לא תקינה.', $json );
+		}
+
+		$target = null;
+		foreach ( WC()->mailer()->get_emails() as $email ) {
+			if ( isset( $email->id ) && $email->id === $which ) {
+				$target = $email;
+				break;
+			}
+		}
+		if ( ! $target ) {
+			$this->finish( 'לא נמצא מייל מסוג ' . $which, $json );
+		}
+		if ( ! $target->is_enabled() ) {
+			$this->finish( 'המייל "' . $which . '" כבוי בהגדרות ווקומרס — הפעילו אותו כדי לשלוח.', $json );
+		}
+
+		$reroute = static function () use ( $to ) {
+			return $to;
+		};
+		add_filter( 'woocommerce_email_recipient_' . $which, $reroute, 999 );
+		$target->trigger( $order->get_id(), $order );
+		remove_filter( 'woocommerce_email_recipient_' . $which, $reroute, 999 );
+
+		$this->finish( sprintf( 'נשלח מייל %s של הזמנה %s אל %s.', $which, $order->get_order_number(), $to ), $json );
+	}
+
+	/**
+	 * @param string[] $json
+	 * @return never
+	 */
+	private function finish( string $message, array $json ): void {
+		set_transient( self::T_RESULT . get_current_user_id(), [ 'message' => $message, 'json' => $json ], 300 );
+		wp_safe_redirect( admin_url( 'admin.php?page=schema-flow#sf-email-test' ) );
+		exit;
+	}
+
+	/** תיבת הבדיקה בעמוד ההגדרות. */
+	public function render_test_box(): void {
+		$key    = self::T_RESULT . get_current_user_id();
+		$result = get_transient( $key );
+		if ( $result ) {
+			delete_transient( $key );
+		}
+		?>
+		<h2 id="sf-email-test">בדיקה — מייל אמיתי לכתובת אחרת</h2>
+		<p style="max-width:760px">
+			שולח את מייל ההזמנה המקורי של הזמנה קיימת לכתובת שתבחרו, בלי לשנות
+			שום דבר בהזמנה ובלי להודיע ללקוח. זה מה שצריך לשלב "דוגמה"
+			ברישום מול גוגל, וגם הדרך לראות את הכרטיס בג׳ימייל לפני האישור —
+			מייל שנשלח מהכתובת שלכם אליה עצמה מרונדר בלי רישום.
+		</p>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="sf_email_test">
+			<?php wp_nonce_field( 'sf_email_test' ); ?>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row"><label for="sf_order">מזהה הזמנה</label></th>
+					<td>
+						<input type="number" name="sf_order" id="sf_order" class="small-text" required>
+						<p class="description">המספר בכתובת של עמוד עריכת ההזמנה</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="sf_email_id">איזה מייל</label></th>
+					<td>
+						<select name="sf_email_id" id="sf_email_id">
+							<option value="customer_completed_order">הזמנה הושלמה</option>
+							<option value="customer_processing_order">הזמנה התקבלה</option>
+							<option value="customer_invoice">חשבונית / פרטי הזמנה</option>
+						</select>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="sf_to">לשלוח אל</label></th>
+					<td>
+						<input type="email" name="sf_to" id="sf_to" class="regular-text"
+							value="schema.whitelisting+sample@gmail.com">
+						<p class="description">זו הכתובת שגוגל מבקשת לדוגמה. לבדיקה עצמית — הכתובת שממנה החנות שולחת</p>
+					</td>
+				</tr>
+			</table>
+			<p>
+				<button type="submit" name="sf_preview" class="button">הצג את הסימון</button>
+				<button type="submit" name="sf_send" class="button button-primary">שלח מייל בדיקה</button>
+			</p>
+		</form>
+		<?php
+		if ( ! $result ) {
+			return;
+		}
+		?>
+		<div class="notice notice-info inline"><p><?php echo esc_html( $result['message'] ); ?></p></div>
+		<?php foreach ( (array) $result['json'] as $one ) : ?>
+			<pre style="max-width:900px;overflow:auto;background:#fff;border:1px solid #c3c4c7;padding:12px;direction:ltr;text-align:left"><?php
+				echo esc_html( wp_json_encode( json_decode( $one, true ), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) );
+			?></pre>
+		<?php endforeach; ?>
+		<?php
 	}
 
 	/** מסיר null / ריקים, ומשמר רשימות כרשימות (כמו ב-Schema_Flow::strip_empty). */

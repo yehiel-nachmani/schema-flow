@@ -3,7 +3,7 @@
  * Plugin Name: Schema Flow
  * Plugin URI: http://new-media.org.il/
  * Description: נתונים מובנים לאתר — שחזור Product schema שתבנית אלמנטור מדלגת עליו, ישות Book אחת לכל ספר (עמוד נחיתה + דף מוצר), וסימון עשיר למיילי ההזמנה בג׳ימייל.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: יחיאל נחמני
  * Author URI: http://new-media.org.il/
  * Text Domain: schema-flow
@@ -15,7 +15,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SFLW_VERSION', '1.2.0' );
+define( 'SFLW_VERSION', '1.3.0' );
 define( 'SFLW_PLUGIN_FILE', __FILE__ );
 define( 'SFLW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -666,6 +666,10 @@ final class Schema_Flow {
 				<em>אל עצמה</em> מרונדר בלי רישום. לבדיקת תקינות הסימון:
 				<a href="https://www.google.com/webmasters/markup-tester/" target="_blank" rel="noopener">Email Markup Tester</a>.
 			</p>
+
+			<?php if ( class_exists( 'SF_Email_Markup' ) ) : ?>
+				<?php SF_Email_Markup::instance()->render_test_box(); ?>
+			<?php endif; ?>
 		</div>
 		<?php
 	}
