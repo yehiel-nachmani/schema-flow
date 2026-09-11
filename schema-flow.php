@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Schema Flow
  * Plugin URI: http://new-media.org.il/
- * Description: נתונים מובנים לאתר — שחזור Product schema שתבנית אלמנטור מדלגת עליו, וישות Book אחת לכל ספר (עמוד נחיתה + דף מוצר).
- * Version: 1.1.0
+ * Description: נתונים מובנים לאתר — שחזור Product schema שתבנית אלמנטור מדלגת עליו, ישות Book אחת לכל ספר (עמוד נחיתה + דף מוצר), וסימון עשיר למיילי ההזמנה בג׳ימייל.
+ * Version: 1.2.0
  * Author: יחיאל נחמני
  * Author URI: http://new-media.org.il/
  * Text Domain: schema-flow
@@ -15,7 +15,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SFLW_VERSION', '1.1.0' );
+define( 'SFLW_VERSION', '1.2.0' );
 define( 'SFLW_PLUGIN_FILE', __FILE__ );
 define( 'SFLW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -539,6 +539,14 @@ final class Schema_Flow {
 	/** @return array<string, array{label:string, type:string, default:string|int, choices?:array<string,string>, hint?:string}> */
 	private function fields(): array {
 		return [
+			'sf_email_markup'  => [
+				'label' => 'סימון עשיר במיילים (ג׳ימייל)', 'type' => 'checkbox', 'default' => 1,
+				'hint'  => 'כרטיס הזמנה ומעקב משלוח מעל מיילי ווקומרס בג׳ימייל. דורש רישום חד-פעמי של כתובת השולח מול גוגל',
+			],
+			'sf_email_carrier' => [
+				'label' => 'שם חברת השילוח', 'type' => 'text', 'default' => 'תפוז',
+				'hint'  => 'לכרטיס המעקב, כשאין ערך שמור בהזמנה',
+			],
 			'sf_ship_cost'     => [ 'label' => 'עלות משלוח', 'type' => 'number', 'default' => 24, 'hint' => 'בשקלים. 0 = משלוח חינם' ],
 			'sf_ship_country'  => [ 'label' => 'ארץ יעד', 'type' => 'text', 'default' => 'IL', 'hint' => 'קוד דו-אותי' ],
 			'sf_handling_min'  => [ 'label' => 'זמן טיפול — מינימום', 'type' => 'number', 'default' => 1, 'hint' => 'ימי עסקים מההזמנה עד המסירה לשליח' ],
@@ -567,10 +575,11 @@ final class Schema_Flow {
 
 	public function register_settings(): void {
 		foreach ( $this->fields() as $key => $field ) {
+			$type = $field['type'];
 			register_setting( 'sf_schema_settings', $key, [
-				'type'              => 'number' === $field['type'] ? 'number' : 'string',
+				'type'              => in_array( $type, [ 'number', 'checkbox' ], true ) ? 'number' : 'string',
 				'default'           => $field['default'],
-				'sanitize_callback' => 'number' === $field['type']
+				'sanitize_callback' => in_array( $type, [ 'number', 'checkbox' ], true )
 					? static fn( $v ) => max( 0, (int) $v )
 					: 'sanitize_text_field',
 			] );
@@ -594,7 +603,7 @@ final class Schema_Flow {
 		}
 		?>
 		<div class="wrap">
-			<h1>Schema Flow — משלוח והחזרות</h1>
+			<h1>Schema Flow — משלוח, החזרות ומיילים</h1>
 			<p style="max-width:760px">
 				שני השדות שגוגל מבקש לכרטיסי מוכרים, וגם מה שמייצר את
 				"משלוח בעלות X ₪ · אפשרות החזרה תוך Y ימים" בתוצאות החיפוש.
@@ -618,6 +627,13 @@ final class Schema_Flow {
 											</option>
 										<?php endforeach; ?>
 									</select>
+								<?php elseif ( 'checkbox' === $field['type'] ) : ?>
+									<label>
+										<input type="hidden" name="<?php echo esc_attr( $key ); ?>" value="0">
+										<input type="checkbox" name="<?php echo esc_attr( $key ); ?>"
+											id="<?php echo esc_attr( $key ); ?>" value="1" <?php checked( (int) $value, 1 ); ?>>
+										פעיל
+									</label>
 								<?php else : ?>
 									<input type="<?php echo esc_attr( $field['type'] ); ?>"
 										name="<?php echo esc_attr( $key ); ?>"
@@ -634,6 +650,22 @@ final class Schema_Flow {
 				</table>
 				<?php submit_button(); ?>
 			</form>
+
+			<h2>סימון עשיר במיילים — מה צריך כדי שזה יעבוד</h2>
+			<p style="max-width:760px">
+				התוסף מטמיע במיילי ההזמנה של ווקומרס שתי ישויות JSON-LD:
+				<code>Order</code> (שם החנות, הפריטים, הסכום וכפתור "צפייה בהזמנה")
+				ו-<code>ParcelDelivery</code> — רק כשיש בהזמנה מספר משלוח —
+				עם מספר המעקב וכפתור "מעקב אחרי המשלוח".
+			</p>
+			<p style="max-width:760px">
+				<strong>הסימון לבדו לא מספיק.</strong> ג׳ימייל מציג את הכרטיס רק לשולחים
+				<a href="https://developers.google.com/workspace/gmail/markup/registering-with-google" target="_blank" rel="noopener">רשומים אצל גוגל</a>:
+				דומיין שולח קבוע, אימות SPF/DKIM, נפח שליחה יציב ודירוג ספאם נמוך.
+				עד הרישום אפשר לראות את הכרטיס בבדיקה — מייל שנשלח מהכתובת שלך
+				<em>אל עצמה</em> מרונדר בלי רישום. לבדיקת תקינות הסימון:
+				<a href="https://www.google.com/webmasters/markup-tester/" target="_blank" rel="noopener">Email Markup Tester</a>.
+			</p>
 		</div>
 		<?php
 	}
@@ -821,8 +853,11 @@ final class Schema_Flow {
 	}
 }
 
+require_once SFLW_PLUGIN_DIR . 'includes/class-sf-email-markup.php';
+
 add_action( 'plugins_loaded', static function (): void {
 	if ( class_exists( 'WooCommerce' ) ) {
 		Schema_Flow::instance();
+		SF_Email_Markup::instance();
 	}
 } );
