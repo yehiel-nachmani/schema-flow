@@ -93,10 +93,18 @@ final class SF_Email_Markup {
 			return $content;
 		}
 
-		$script = '';
-		foreach ( $this->nodes_for( $order, $email_id ) as $json ) {
-			$script .= '<script type="application/ld+json">' . $json . "</script>\n";
+		// הסימון הוא קישוט. אם הבנייה נכשלת, המייל חייב לצאת בכל זאת —
+		// ולכן כל מה שנוגע בנתוני ההזמנה עטוף, והכישלון נרשם ללוג.
+		try {
+			$script = '';
+			foreach ( $this->nodes_for( $order, $email_id ) as $json ) {
+				$script .= '<script type="application/ld+json">' . $json . "</script>\n";
+			}
+		} catch ( \Throwable $e ) {
+			self::log_failure( $e, $order );
+			return $content;
 		}
+
 		if ( '' === $script ) {
 			return $content;
 		}
@@ -385,12 +393,25 @@ final class SF_Email_Markup {
 			$which = 'customer_completed_order';
 		}
 
+		self::watch_fatals();
+
 		$order = $order_id ? wc_get_order( $order_id ) : null;
 		if ( ! $order instanceof WC_Order ) {
 			$this->finish( 'לא נמצאה הזמנה עם המזהה ' . $order_id, [] );
 		}
 
-		$json = $this->nodes_for( $order, $which );
+		try {
+			$json = $this->nodes_for( $order, $which );
+		} catch ( \Throwable $e ) {
+			self::log_failure( $e, $order );
+			$this->finish( sprintf(
+				'הבנייה נכשלה — %s: %s (%s שורה %d)',
+				get_class( $e ),
+				$e->getMessage(),
+				str_replace( ABSPATH, '', $e->getFile() ),
+				$e->getLine()
+			), [] );
+		}
 
 		if ( ! $send ) {
 			$this->finish( sprintf( 'הסימון של הזמנה %s — %d ישויות.', $order->get_order_number(), count( $json ) ), $json );
@@ -436,10 +457,16 @@ final class SF_Email_Markup {
 
 	/** תיבת הבדיקה בעמוד ההגדרות. */
 	public function render_test_box(): void {
+		self::watch_fatals();
+
 		$key    = self::T_RESULT . get_current_user_id();
 		$result = get_transient( $key );
+		// נמחק לפני ההצגה בכוונה: תוצאה שמפילה את העמוד לא תפיל אותו שוב ברענון.
 		if ( $result ) {
 			delete_transient( $key );
+		}
+		if ( $result && ! is_array( $result ) ) {
+			$result = [ 'message' => 'תוצאה בפורמט לא צפוי.', 'json' => [] ];
 		}
 		?>
 		<h2 id="sf-email-test">בדיקה — מייל אמיתי לכתובת אחרת</h2>
@@ -489,13 +516,51 @@ final class SF_Email_Markup {
 			return;
 		}
 		?>
-		<div class="notice notice-info inline"><p><?php echo esc_html( $result['message'] ); ?></p></div>
-		<?php foreach ( (array) $result['json'] as $one ) : ?>
+		<div class="notice notice-info inline"><p><?php echo esc_html( (string) ( $result['message'] ?? '' ) ); ?></p></div>
+		<?php foreach ( (array) ( $result['json'] ?? [] ) as $one ) : ?>
 			<pre style="max-width:900px;overflow:auto;background:#fff;border:1px solid #c3c4c7;padding:12px;direction:ltr;text-align:left"><?php
-				echo esc_html( wp_json_encode( json_decode( $one, true ), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) );
+				$decoded = json_decode( (string) $one, true );
+				echo esc_html( (string) wp_json_encode( $decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) );
 			?></pre>
 		<?php endforeach; ?>
 		<?php
+	}
+
+	/**
+	 * גם fatal שאינו Throwable (זיכרון, זמן ריצה, undefined function) ישאיר
+	 * עקבות בלוג — try/catch לבדו לא תופס את אלה.
+	 */
+	private static function watch_fatals(): void {
+		static $armed = false;
+		if ( $armed ) {
+			return;
+		}
+		$armed = true;
+
+		register_shutdown_function( static function (): void {
+			$last = error_get_last();
+			if ( $last && in_array( $last['type'], [ E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR ], true ) ) {
+				self::log_raw( sprintf( 'FATAL %s @ %s:%d', $last['message'], $last['file'], $last['line'] ) );
+			}
+		} );
+	}
+
+	/** רישום כישלון ללוג של ווקומרס, מקור schema-flow. */
+	private static function log_failure( \Throwable $e, ?WC_Order $order = null ): void {
+		self::log_raw( sprintf(
+			'%s: %s @ %s:%d | order %s',
+			get_class( $e ),
+			$e->getMessage(),
+			str_replace( ABSPATH, '', $e->getFile() ),
+			$e->getLine(),
+			$order ? (string) $order->get_id() : '-'
+		) );
+	}
+
+	private static function log_raw( string $message ): void {
+		if ( function_exists( 'wc_get_logger' ) ) {
+			wc_get_logger()->error( $message, [ 'source' => 'schema-flow' ] );
+		}
 	}
 
 	/** מסיר null / ריקים, ומשמר רשימות כרשימות (כמו ב-Schema_Flow::strip_empty). */
