@@ -421,6 +421,7 @@ final class SF_Email_Markup {
 		$which    = sanitize_text_field( wp_unslash( $_POST['sf_email_id'] ?? '' ) );
 		$to       = sanitize_email( wp_unslash( $_POST['sf_to'] ?? '' ) );
 		$send     = isset( $_POST['sf_send'] );
+		$dry      = isset( $_POST['sf_dry'] );
 
 		if ( ! in_array( $which, self::EMAILS, true ) ) {
 			$which = 'customer_completed_order';
@@ -448,7 +449,7 @@ final class SF_Email_Markup {
 			), [] );
 		}
 
-		if ( ! $send ) {
+		if ( ! $send && ! $dry ) {
 			$this->finish( sprintf( 'הסימון של הזמנה %s — %d ישויות.', $order->get_order_number(), count( $json ) ), $json );
 		}
 
@@ -470,14 +471,57 @@ final class SF_Email_Markup {
 			$this->finish( 'המייל "' . $which . '" כבוי בהגדרות ווקומרס — הפעילו אותו כדי לשלוח.', $json );
 		}
 
+		// הנמען מוסט תמיד — גם בהרצה יבשה, כרשת ביטחון אם החסימה תיכשל.
 		$reroute = static function () use ( $to ) {
 			return $to;
 		};
 		add_filter( 'woocommerce_email_recipient_' . $which, $reroute, 999 );
+
+		// הרצה יבשה: תופסים את הגוף הסופי (אחרי ההזרקה) וחוסמים את השליחה.
+		$final = '';
+		$grab  = static function ( $content ) use ( &$final ) {
+			$final = (string) $content;
+			return $content;
+		};
+		$block = static fn() => true; // pre_wp_mail שמחזיר לא-null = "טופל", בלי לשלוח
+
+		if ( $dry ) {
+			add_filter( 'woocommerce_mail_content', $grab, PHP_INT_MAX );
+			add_filter( 'pre_wp_mail', $block, 1 );
+		}
+
 		$target->trigger( $order->get_id(), $order );
+
+		if ( $dry ) {
+			remove_filter( 'pre_wp_mail', $block, 1 );
+			remove_filter( 'woocommerce_mail_content', $grab, PHP_INT_MAX );
+		}
 		remove_filter( 'woocommerce_email_recipient_' . $which, $reroute, 999 );
 
+		if ( $dry ) {
+			$this->finish( $this->dry_report( $final, $which ), $json );
+		}
+
 		$this->finish( sprintf( 'נשלח מייל %s של הזמנה %s אל %s.', $which, $order->get_order_number(), $to ), $json );
+	}
+
+	/** מה באמת יצא: האם ה-script שרד את כל שרשרת הפילטרים, וכמה. */
+	private function dry_report( string $final, string $which ): string {
+		if ( '' === $final ) {
+			return sprintf( 'הרצה יבשה של %s: גוף המייל לא נתפס — הפילטר woocommerce_mail_content לא רץ. סימן שהשליחה לא עוברת ב-WC_Email::send().', $which );
+		}
+
+		$count = substr_count( $final, 'application/ld+json' );
+		$head  = stripos( $final, '</head>' );
+
+		return sprintf(
+			'הרצה יבשה של %s (לא נשלח): גוף באורך %s תווים, %d תגיות ld+json, ה-script %s לפני </head>. %s',
+			$which,
+			number_format( strlen( $final ) ),
+			$count,
+			( false !== $head && stripos( substr( $final, 0, (int) $head ), 'application/ld+json' ) !== false ) ? 'כן' : 'לא',
+			$count ? 'הסימון בגוף המייל.' : 'הסימון לא בגוף המייל — משהו בשרשרת מסיר אותו.'
+		);
 	}
 
 	/**
@@ -543,6 +587,7 @@ final class SF_Email_Markup {
 			</table>
 			<p>
 				<button type="submit" name="sf_preview" class="button">הצג את הסימון</button>
+				<button type="submit" name="sf_dry" class="button">בדוק את המייל בלי לשלוח</button>
 				<button type="submit" name="sf_send" class="button button-primary">שלח מייל בדיקה</button>
 			</p>
 		</form>
