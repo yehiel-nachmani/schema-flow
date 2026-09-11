@@ -260,13 +260,18 @@ final class SF_Email_Markup {
 			$product = $item->get_product();
 			$price   = (float) $item->get_total() + (float) $item->get_total_tax();
 
+			// קישור ותמונה עוברים דרך פילטרים של וורדפרס שתוספים אחרים רוכבים
+			// עליהם. תוסף שנופל שם לא יפיל את הסימון — פשוט נוותר על השדה.
+			$url   = $product ? self::guarded( fn() => (string) $product->get_permalink( $item ) ) : '';
+			$image = $product ? self::guarded( fn() => $this->image( $product ) ) : '';
+
 			$offers[] = [
 				'@type'       => 'Offer',
 				'itemOffered' => [
 					'@type' => 'Product',
 					'name'  => wp_strip_all_tags( $item->get_name() ),
-					'url'   => $product ? $product->get_permalink( $item ) : '',
-					'image' => $product ? $this->image( $product ) : '',
+					'url'   => $url,
+					'image' => $image,
 					'sku'   => $product ? (string) $product->get_sku() : '',
 				],
 				'price'            => (string) wc_format_decimal( $price, 2 ),
@@ -404,12 +409,14 @@ final class SF_Email_Markup {
 			$json = $this->nodes_for( $order, $which );
 		} catch ( \Throwable $e ) {
 			self::log_failure( $e, $order );
+			$frames = array_slice( explode( "\n", str_replace( ABSPATH, '', $e->getTraceAsString() ) ), 0, 4 );
 			$this->finish( sprintf(
-				'הבנייה נכשלה — %s: %s (%s שורה %d)',
+				'הבנייה נכשלה — %s: %s (%s שורה %d) | %s',
 				get_class( $e ),
 				$e->getMessage(),
 				str_replace( ABSPATH, '', $e->getFile() ),
-				$e->getLine()
+				$e->getLine(),
+				implode( ' « ', $frames )
 			), [] );
 		}
 
@@ -545,15 +552,29 @@ final class SF_Email_Markup {
 		} );
 	}
 
+	/**
+	 * מריץ שדה לא-קריטי ומחזיר '' אם משהו נפל בדרך. קיים כי שדות כמו
+	 * קישור ותמונה עוברים בפילטרים ציבוריים שכל תוסף באתר יכול לשבת עליהם.
+	 */
+	private static function guarded( callable $fn ): string {
+		try {
+			return (string) $fn();
+		} catch ( \Throwable $e ) {
+			self::log_failure( $e );
+			return '';
+		}
+	}
+
 	/** רישום כישלון ללוג של ווקומרס, מקור schema-flow. */
 	private static function log_failure( \Throwable $e, ?WC_Order $order = null ): void {
 		self::log_raw( sprintf(
-			'%s: %s @ %s:%d | order %s',
+			"%s: %s @ %s:%d | order %s\n%s",
 			get_class( $e ),
 			$e->getMessage(),
 			str_replace( ABSPATH, '', $e->getFile() ),
 			$e->getLine(),
-			$order ? (string) $order->get_id() : '-'
+			$order ? (string) $order->get_id() : '-',
+			str_replace( ABSPATH, '', $e->getTraceAsString() )
 		) );
 	}
 
