@@ -156,7 +156,7 @@ final class SF_Email_Markup {
 
 	private function order_node( WC_Order $order ): array {
 		$currency = $order->get_currency();
-		$url      = $order->get_checkout_order_received_url(); // ציבורי, בלי התחברות
+		$url      = $this->received_url( $order ); // ציבורי, בלי התחברות
 		$customer = trim( $order->get_formatted_billing_full_name() );
 		$date     = $order->get_date_created();
 
@@ -180,6 +180,32 @@ final class SF_Email_Markup {
 		];
 
 		return (array) apply_filters( 'sf_email_markup_order', $node, $order );
+	}
+
+	/**
+	 * כתובת "תודה על ההזמנה" — ציבורית, נפתחת בלי התחברות.
+	 *
+	 * get_checkout_order_received_url() מפעיל פילטר ציבורי, ולפחות תוסף אחד
+	 * באתר (WP Pay Per View) קורא בתוכו ל-wc_get_raw_referer() שאינה נטענת
+	 * בבקשת אדמין — ומפיל את כל הבקשה. לכן: מנסים, ואם נפל בונים את אותה
+	 * כתובת בעצמנו בלי לעבור בפילטר.
+	 */
+	private function received_url( WC_Order $order ): string {
+		$url = self::guarded( static fn() => (string) $order->get_checkout_order_received_url() );
+		if ( '' !== $url ) {
+			return $url;
+		}
+
+		return self::guarded( static function () use ( $order ) {
+			if ( ! function_exists( 'wc_get_endpoint_url' ) || ! function_exists( 'wc_get_checkout_url' ) ) {
+				return '';
+			}
+			return add_query_arg(
+				'key',
+				$order->get_order_key(),
+				wc_get_endpoint_url( 'order-received', $order->get_id(), wc_get_checkout_url() )
+			);
+		} );
 	}
 
 	private function parcel_node( WC_Order $order ): array {
